@@ -442,6 +442,35 @@ inline __device__ void device_flash_attention_nl(Params const& params)
         // Convert from the accumulator type to FP32 for Softmax.
         softmax.unpack(acc_p);
 
+        // ===== DEBUG: Print attention scores after unpack =====
+        if (tidx == 0 && kv_loop == kv_loop_start && q_loop == 0 && bidb == 0 && bidh == 0) {
+            printf("\n[AFTER-UNPACK] batch=%d, head=%d, q_loop=%d, kv_loop=%d\n", bidb, bidh, q_loop, kv_loop);
+            printf("[AFTER-UNPACK] Attention Scores (Q x K^T / sqrt(d_k)) in FP32:\n");
+            // scale_bmm1 is uint32_t storing float bit pattern, need reinterpret_cast
+            float scale_bmm1_val = reinterpret_cast<float const&>(params.scale_bmm1);
+            printf("[AFTER-UNPACK] scale_bmm1=%.6f, ROWS_PER_THREAD=%d\n", 
+                   scale_bmm1_val, Softmax::ROWS_PER_THREAD);
+            
+            // Print first 8 rows, each row showing first 16 values
+            int max_rows = min(8, Softmax::ROWS_PER_THREAD * Mma_tile_p::MMAS_M);
+            int max_cols = 16;
+            
+            printf("  First %dx%d attention scores:\n", max_rows, max_cols);
+            for (int row = 0; row < max_rows; row++) {
+                printf("  [%2d]: ", row);
+                // Note: elt_ layout is [MMAS_M * 2][MMAS_N * 4]
+                int mi = row / 2;
+                int row_offset = row % 2;
+                if (mi < Mma_tile_p::MMAS_M) {
+                    for (int col = 0; col < max_cols && col < Mma_tile_p::MMAS_N * 4; col++) {
+                        printf("%7.4f ", softmax.elt_[row][col]);
+                    }
+                }
+                printf("\n");
+            }
+            printf("\n");
+        }
+
         // Apply the mask.
         if (apply_mask)
         {
@@ -455,6 +484,33 @@ inline __device__ void device_flash_attention_nl(Params const& params)
             else
             {
                 softmax.apply_mask(mask);
+            }
+            
+            // ===== DEBUG: Print attention scores after mask =====
+            if (tidx == 0 && kv_loop == kv_loop_start && q_loop == 0 && bidb == 0 && bidh == 0) {
+                printf("\n[AFTER-MASK] batch=%d, head=%d, q_loop=%d, kv_loop=%d\n", bidb, bidh, q_loop, kv_loop);
+                printf("[AFTER-MASK] Attention Scores after masking (should see -inf or very negative values):\n");
+                
+                int max_rows = min(8, Softmax::ROWS_PER_THREAD * Mma_tile_p::MMAS_M);
+                int max_cols = 16;
+                
+                printf("  First %dx%d masked scores:\n", max_rows, max_cols);
+                for (int row = 0; row < max_rows; row++) {
+                    printf("  [%2d]: ", row);
+                    int mi = row / 2;
+                    if (mi < Mma_tile_p::MMAS_M) {
+                        for (int col = 0; col < max_cols && col < Mma_tile_p::MMAS_N * 4; col++) {
+                            float val = softmax.elt_[row][col];
+                            if (val < -1e10f) {
+                                printf("   -inf ");
+                            } else {
+                                printf("%7.4f ", val);
+                            }
+                        }
+                    }
+                    printf("\n");
+                }
+                printf("\n");
             }
         }
 
@@ -502,6 +558,52 @@ inline __device__ void device_flash_attention_nl(Params const& params)
 
             // Update last step's acc_o.
             acc_o_normalizer.update(acc_o, global_max, tmp, global_sum);
+            
+            // ===== DEBUG: Print acc_o and global_sum after each KV tile update =====
+            if (tidx == 0 && q_loop == 0 && bidb == 0 && bidh == 0) {
+                printf("\n[KV-LOOP-UPDATE] batch=%d, head=%d, q_loop=%d, kv_loop=%d\n", 
+                       bidb, bidh, q_loop, kv_loop);
+                printf("[KV-LOOP-UPDATE] After acc_o_normalizer.update():\n");
+                
+                // Print global_sum (normalization factor)
+                printf("  global_sum array (first %d rows):\n    [", 
+                       min(4, Softmax::ROWS_PER_THREAD));
+                for (int i = 0; i < min(4, Softmax::ROWS_PER_THREAD); i++) {
+                    printf("%.6f", global_sum[i]);
+                    if (i < min(4, Softmax::ROWS_PER_THREAD) - 1) printf(", ");
+                }
+                printf("]\n");
+                
+                // Print global_max
+                printf("  global_max array (first %d rows):\n    [", 
+                       min(4, Softmax::ROWS_PER_THREAD));
+                for (int i = 0; i < min(4, Softmax::ROWS_PER_THREAD); i++) {
+                    printf("%.6f", global_max[i]);
+                    if (i < min(4, Softmax::ROWS_PER_THREAD) - 1) printf(", ");
+                }
+                printf("]\n");
+                
+                // Print acc_o fragments
+                printf("  acc_o fragments (Dimensions: MMAS_M=%d, MMAS_N=%d):\n", 
+                       Mma_tile_o::MMAS_M, Mma_tile_o::MMAS_N);
+                int max_m = min(2, Mma_tile_o::MMAS_M);
+                int max_n = min(2, Mma_tile_o::MMAS_N);
+                
+                for (int mi = 0; mi < max_m; mi++) {
+                    for (int ni = 0; ni < max_n; ni++) {
+                        printf("    acc_o[%d][%d]: [", mi, ni);
+                        int num_print = min(8, 16);
+                        for (int ei = 0; ei < num_print; ei++) {
+                            float val = float(acc_o[mi][ni].elt(ei));
+                            printf("%.6f", val);
+                            if (ei < num_print - 1) printf(", ");
+                        }
+                        printf("]\n");
+                    }
+                }
+                printf("\n");
+            }
+            
             // Apply expf of softmax.
             // It is possible that all elts are -FLT_MAX with sliding_window_causal.
             softmax.template apply_exp_with_mask<CHECK_NEG_INF>(global_max);
@@ -522,6 +624,37 @@ inline __device__ void device_flash_attention_nl(Params const& params)
             {
                 global_sum[i] += tmp[i];
             }
+        }
+
+        // ===== DEBUG: Print softmax statistics after sum reduction =====
+        if (tidx == 0 && kv_loop == kv_loop_start && q_loop == 0 && bidb == 0 && bidh == 0) {
+            printf("\n[AFTER-SOFTMAX-SUM] batch=%d, head=%d, q_loop=%d, kv_loop=%d\n", bidb, bidh, q_loop, kv_loop);
+            printf("[AFTER-SOFTMAX-SUM] Statistics after exp and sum:\n");
+            printf("  global_max (per row): ");
+            for (int i = 0; i < min(4, Softmax::ROWS_PER_THREAD); i++) {
+                printf("%.6f ", global_max[i]);
+            }
+            printf("\n  global_sum (per row): ");
+            for (int i = 0; i < min(4, Softmax::ROWS_PER_THREAD); i++) {
+                printf("%.6f ", global_sum[i]);
+            }
+            printf("\n");
+            
+            // Print exp values (before final normalization by global_sum)
+            int max_rows = min(4, Softmax::ROWS_PER_THREAD * Mma_tile_p::MMAS_M);
+            int max_cols = 16;
+            printf("  First %dx%d exp values (before division by sum):\n", max_rows, max_cols);
+            for (int row = 0; row < max_rows; row++) {
+                printf("  [%2d]: ", row);
+                int mi = row / 2;
+                if (mi < Mma_tile_p::MMAS_M) {
+                    for (int col = 0; col < max_cols && col < Mma_tile_p::MMAS_N * 4; col++) {
+                        printf("%7.4f ", softmax.elt_[row][col]);
+                    }
+                }
+                printf("\n");
+            }
+            printf("\n");
         }
 
         // Trigger the load for the next K/V values.
@@ -609,7 +742,39 @@ inline __device__ void device_flash_attention_nl(Params const& params)
 
         // Repack for the next BMM.
         fmha::Fragment_a<Traits_p, fmha::Row> frag_p[Mma_tile_o::MMAS_K][Mma_tile_o::MMAS_M];
+        if (tidx == 0 && q_loop == 0 && bidb == 0 && bidh == 0) printf("Packing softmax weights into frag_p, kv_loop: %d\n", kv_loop);
         softmax.pack(frag_p);
+        __syncthreads();
+        softmax.pack(frag_p);
+        __syncthreads();
+        if (tidx == 0 && q_loop == 0 && bidb == 0 && bidh == 0) printf("Done Packing softmax weights into frag_p, kv_loop: %d\n", kv_loop);
+        
+        // ===== DEBUG: Print softmax weights after pack (frag_p) =====
+        if (tidx == 0 && q_loop == 0 && bidb == 0 && bidh == 0) {
+            printf("\n[SOFTMAX-PACKED] batch=%d, head=%d, q_loop=%d, kv_loop=%d\n", 
+                   bidb, bidh, q_loop, kv_loop);
+            printf("[SOFTMAX-PACKED] Softmax weights packed into frag_p (for P × V):\n");
+            printf("  Dimensions: MMAS_K=%d, MMAS_M=%d\n", Mma_tile_o::MMAS_K, Mma_tile_o::MMAS_M);
+            
+            // Print frag_p fragments
+            int max_k = min(2, Mma_tile_o::MMAS_K);
+            int max_m = min(2, Mma_tile_o::MMAS_M);
+            
+            printf("  First %dx%d fragments:\n", max_k, max_m);
+            for (int ki = 0; ki < max_k; ki++) {
+                for (int mi = 0; mi < max_m; mi++) {
+                    printf("    frag_p[%d][%d]: [", ki, mi);
+                    // Each fragment has multiple elements
+                    int num_print = min(8, 16);
+                    for (int ei = 0; ei < num_print; ei++) {
+                        float val = float(frag_p[ki][mi].elt(ei));
+                        printf("%.6f", val);
+                        if (ei < num_print - 1) printf(", ");
+                    }
+                    printf("]\n");
+                }
+            }
+        }
 
         // Do this part of O = P^T * V^T.
         fmha::Fragment_accumulator<Traits_o>(*acc_o_step)[Mma_tile_o::MMAS_M][Mma_tile_o::VALID_MMAS_N] = nullptr;
@@ -711,8 +876,65 @@ inline __device__ void device_flash_attention_nl(Params const& params)
 
     // Update the sum if attention sinks are used.
     acc_o_normalizer.update_sum(global_max, global_sum);
+    
+    // ===== DEBUG: Print acc_o and global_sum BEFORE final_update =====
+    if (tidx == 0 && q_loop == 0 && bidb == 0 && bidh == 0) {
+        printf("\n[BEFORE-FINAL-UPDATE] batch=%d, head=%d, q_loop=%d\n", bidb, bidh, q_loop);
+        printf("[BEFORE-FINAL-UPDATE] global_sum = %.6f (used for normalization)\n", global_sum);
+        printf("[BEFORE-FINAL-UPDATE] acc_o values BEFORE normalization:\n");
+        printf("  Dimensions: MMAS_M=%d, MMAS_N=%d\n", Mma_tile_o::MMAS_M, Mma_tile_o::MMAS_N);
+        
+        int max_m = min(2, Mma_tile_o::MMAS_M);
+        int max_n = min(2, Mma_tile_o::MMAS_N);
+        
+        printf("  First %dx%d MMA fragments (before normalization):\n", max_m, max_n);
+        for (int mi = 0; mi < max_m; mi++) {
+            for (int ni = 0; ni < max_n; ni++) {
+                printf("    acc_o[%d][%d]: [", mi, ni);
+                int num_print = min(8, 16);
+                for (int ei = 0; ei < num_print; ei++) {
+                    float val = float(acc_o[mi][ni].elt(ei));
+                    printf("%.6f", val);
+                    if (ei < num_print - 1) printf(", ");
+                }
+                printf("]\n");
+            }
+        }
+        printf("  NOTE: These values will be divided by global_sum=%.6f\n\n", global_sum);
+    }
+    
     // Update acc_o of flash attention
     acc_o_normalizer.final_update(acc_o, global_sum);
+    
+    // ===== DEBUG: Print acc_o values using Fragment elt() method =====
+    if (tidx == 0 && q_loop == 0 && bidb == 0 && bidh == 0) {
+        printf("\n[ACC-O-REGISTERS] batch=%d, head=%d, q_loop=%d\n", bidb, bidh, q_loop);
+        printf("[ACC-O-REGISTERS] Output accumulator (acc_o) values after final_update:\n");
+        printf("  Dimensions: MMAS_M=%d, MMAS_N=%d\n", Mma_tile_o::MMAS_M, Mma_tile_o::MMAS_N);
+        
+        // Print acc_o fragment by fragment
+        // Each acc_o[mi][ni] is a Fragment with NUM_ELTS elements
+        int max_m = min(2, Mma_tile_o::MMAS_M);
+        int max_n = min(2, Mma_tile_o::MMAS_N);
+        
+        printf("  First %dx%d MMA fragments:\n", max_m, max_n);
+        for (int mi = 0; mi < max_m; mi++) {
+            for (int ni = 0; ni < max_n; ni++) {
+                printf("    acc_o[%d][%d]: [", mi, ni);
+                // Each fragment has multiple elements (typically 8 for FP16)
+                // Access using elt() method: acc_o[mi][ni].elt(ei)
+                int num_print = min(8, 16);  // Print first 8 elements
+                for (int ei = 0; ei < num_print; ei++) {
+                    // Convert to float for printing
+                    float val = float(acc_o[mi][ni].elt(ei));
+                    printf("%.6f", val);
+                    if (ei < num_print - 1) printf(", ");
+                }
+                printf("]\n");
+            }
+        }
+        printf("\n");
+    }
 
     // Wait for last round of LDS K/V to finish
     __syncthreads();
@@ -740,6 +962,41 @@ inline __device__ void device_flash_attention_nl(Params const& params)
 
         // Output the values.
         gmem_o.store(out, ii);
+        
+        // ===== DEBUG: Print gmem_o output values =====
+        if (tidx == 0 && ii == 0 && q_loop == 0 && bidb == 0 && bidh == 0) {
+            printf("\n[GMEM-O-STORE] batch=%d, head=%d, q_loop=%d, loop_ii=%d\n", bidb, bidh, q_loop, ii);
+            printf("[GMEM-O-STORE] Values stored to global memory (out array):\n");
+            printf("  STGS_PER_LOOP=%d (each uint4 = 8 FP16 values)\n", Gmem_tile_o::STGS_PER_LOOP);
+            
+            // Print the out array that was just stored
+            int max_print = min(8, Gmem_tile_o::STGS_PER_LOOP);
+            printf("[GMEM-O-STORE] First %d uint4 chunks (= %d FP16 values total):\n", 
+                   max_print, max_print * 8);
+            
+            for (int i = 0; i < max_print; i++) {
+                // Interpret as half precision floats (8 per uint4)
+                half* h_ptr = reinterpret_cast<half*>(&out[i]);
+                printf("  chunk[%d] (FP16): [", i);
+                for (int j = 0; j < 8; j++) {
+                    printf("%.6f", float(h_ptr[j]));
+                    if (j < 7) printf(", ");
+                }
+                printf("]\n");
+            }
+            
+            // Print as continuous array
+            printf("\n[GMEM-O-STORE] As continuous array (first %d values):\n  [", max_print * 8);
+            for (int i = 0; i < max_print; i++) {
+                half* h_ptr = reinterpret_cast<half*>(&out[i]);
+                for (int j = 0; j < 8; j++) {
+                    printf("%.4f", float(h_ptr[j]));
+                    if (i < max_print - 1 || j < 7) printf(", ");
+                }
+            }
+            printf("]\n\n");
+        }
+        
     }
 
     if (params.softmax_stats_ptr != nullptr)

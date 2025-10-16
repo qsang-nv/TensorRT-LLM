@@ -3064,7 +3064,7 @@ def get_kernel_traits_code(specs_names):
 # You should set the condition `use_cubin_header` to false if you have modified the source codes of those kernels that use cubins.
 # This ensures that the kernels will be recompiled using the updated source code rather than relying on precompiled cubins.
 def use_cubin_header(sm, head_size, dtype):
-    return (sm == 90 and head_size == 128) or (sm == 89 and 'e4m3' in dtype)
+    return (sm == 90 and head_size == 128) #or (sm == 89 and 'e4m3' in dtype)
 
 
 def get_cubin_header(kernel_traits, specs_names):
@@ -6363,7 +6363,7 @@ def enumerate_kernels():
     # yapf: disable
     specs_names = [(kspec, *encode_name(kspec)) for kspec in specs_expanded
                   # Volta is deprecated in TRT-LLM.
-                  if  (kspec.sm            in [80, 86, 89, 90, 120]
+                  if  (kspec.sm            in [89]
                   and kspec.dtype         in ['fp16', 'bf16', 'fp16_fp32', 'e4m3', 'e4m3_fp32']
                   and kspec.head_size     <= 256
                   and kspec.head_size_v   == 0
@@ -6386,7 +6386,7 @@ def enumerate_kernels():
                   and kspec.head_size_v   == 512
                   and kspec.input_layout == InputLayout.Q_PAGED_KV
                   and kspec.sage_block_sizes is None
-                  and kspec.version       == 2
+                  and kspec.version       == 1
                   and kspec.cross_mha     == False
                   and kspec.flash_attention == True
                   and kspec.warp_specialization == False
@@ -6398,7 +6398,7 @@ def enumerate_kernels():
                   and kspec.head_size_v   == 128
                   and kspec.input_layout == InputLayout.SEPARATE_Q_K_V
                   and kspec.sage_block_sizes is None
-                  and kspec.version       == 2
+                  and kspec.version       == 1
                   and kspec.cross_mha     == False
                   and kspec.flash_attention == True
                   and ((kspec.warp_specialization == True and kspec.alibi == False)   # sm90
@@ -6407,7 +6407,7 @@ def enumerate_kernels():
                   # SageAttention (warp_spec, head_size in (80, 128), packed QKV, padding mask)
                   or (kspec.sm            == 90
                   and kspec.head_size     in [80, 128]
-                  and kspec.version       == 2
+                  and kspec.version       == 1
                   and kspec.sage_block_sizes in [(64, 64, 256)]
                   and kspec.cross_mha     == False
                   and kspec.flash_attention == True
@@ -6420,7 +6420,7 @@ def enumerate_kernels():
                   and kspec.head_size     in [80, 128]
                   and kspec.sage_block_sizes in [(64, 32, 32)]
                   and kspec.output_dtype in ['fp16', 'bf16']
-                  and kspec.version       == 2
+                  and kspec.version       == 1
                   and kspec.cross_mha     == False
                   and kspec.flash_attention == True
                   and kspec.warp_specialization == False

@@ -174,7 +174,14 @@ class NemotronHLayer(DecoderLayer):
         residual = hidden_states
 
         hidden_states = self.norm(hidden_states)
+        if self.layer_type == "*":
+            print("before attention")
+            print(hidden_states.flatten()[:16])
         hidden_states = self.mixer(hidden_states, attn_metadata, **kwargs)
+        if self.layer_type == "*":
+            print("after attention")
+            print(hidden_states.flatten()[:16])
+            import pdb; pdb.set_trace()
         hidden_states = torch.add(hidden_states, residual)
 
         return hidden_states

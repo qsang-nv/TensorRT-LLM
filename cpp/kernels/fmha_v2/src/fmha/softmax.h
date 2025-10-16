@@ -1537,6 +1537,18 @@ struct Softmax_qmma<fmha::Ada_qmma_e4m3_fp32_traits, Cta_tile, Kernel_traits>
     {
         float const scale = reinterpret_cast<float const&>(this->params_scale_softmax_);
 
+        bool debug = (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0);
+        if (debug) {
+            printf("Packing data to fragment for the next GEMM\n");
+            printf("Scale: %.6f\n", scale);
+        }
+
+        if (debug) {
+            printf("First 2 elements of the fragment:\n");
+            printf("elt_[0][0]: %.6f\n", this->elt_[0][0]);
+            printf("elt_[0][1]: %.6f\n", this->elt_[0][1]);
+        }
+
 // The canonical layout in K should be R0: [0,1,2,3] R2: [16,17,18,19]
 // Note below that this is not possible with the register layout of the accumulator.
 #pragma unroll
@@ -1570,8 +1582,71 @@ struct Softmax_qmma<fmha::Ada_qmma_e4m3_fp32_traits, Cta_tile, Kernel_traits>
                 dst[ki][mi].reg(1) = fmha::float4_to_fp8x4<Traits::A_type>(tmp_10, tmp_11, tmp_12, tmp_13);
                 dst[ki][mi].reg(2) = fmha::float4_to_fp8x4<Traits::A_type>(tmp_04, tmp_05, tmp_06, tmp_07);
                 dst[ki][mi].reg(3) = fmha::float4_to_fp8x4<Traits::A_type>(tmp_14, tmp_15, tmp_16, tmp_17);
+                if (debug) {
+                    printf("ki: %d, mi: %d\n", ki, mi);
+                    printf("tmp_00: %.6f, tmp_01: %.6f, tmp_02: %.6f, tmp_03: %.6f, tmp_04: %.6f, tmp_05: %.6f, tmp_06: %.6f, tmp_07: %.6f\n",
+                           tmp_00, tmp_01, tmp_02, tmp_03, tmp_04, tmp_05, tmp_06, tmp_07);
+                    printf("tmp_10: %.6f, tmp_11: %.6f, tmp_12: %.6f, tmp_13: %.6f, tmp_14: %.6f, tmp_15: %.6f, tmp_16: %.6f, tmp_17: %.6f\n",
+                           tmp_10, tmp_11, tmp_12, tmp_13, tmp_14, tmp_15, tmp_16, tmp_17);
+                    printf("dst[%d][%d]: [", ki, mi);
+                    printf("%.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f\n",
+                           dst[ki][mi].elt(0), dst[ki][mi].elt(1), dst[ki][mi].elt(2), dst[ki][mi].elt(3),
+                           dst[ki][mi].elt(4), dst[ki][mi].elt(5), dst[ki][mi].elt(6), dst[ki][mi].elt(7));
+                    printf("]\n");
+                }
             }
         }
+        
+        /*// ===== DEBUG: Print dst after packing =====
+        if (debug) {
+            printf("\n[SOFTMAX-PACK-DST] Packed softmax weights in dst array:\n");
+            printf("  Dimensions: K=%d, M=%d\n", K, M);
+            printf("  Each dst[ki][mi] has 4 registers, each register contains FP8 data\n");
+            
+            // Print first few dst fragments
+            int max_k = (K < 2) ? K : 2;
+            int max_m = (M < 2) ? M : 2;
+            
+            printf("  First %dx%d fragments:\n", max_k, max_m);
+            for (int ki = 0; ki < max_k; ki++) {
+                for (int mi = 0; mi < max_m; mi++) {
+                    printf("    dst[%d][%d]: [", ki, mi);
+                    // Each fragment has elements accessible via elt()
+                    // Try to print first 8 elements
+                    int num_print = 8;
+                    for (int ei = 0; ei < num_print; ei++) {
+                        float val = float(dst[ki][mi].elt(ei));
+                        printf("%.6f", val);
+                        if (ei < num_print - 1) printf(", ");
+                    }
+                    printf("]\n");
+                }
+            }
+            
+            // Also print the tmp values that were just packed (FP32 before conversion)
+            printf("\n  Original FP32 values before FP8 conversion (last ki=%d, mi=%d):\n", K-1, M-1);
+            int mi = M - 1;
+            int ki = K - 1;
+            printf("    Row 1: tmp_00-07: %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f\n",
+                   this->elt_[2 * mi + 0][8 * ki + 0] * scale,
+                   this->elt_[2 * mi + 0][8 * ki + 1] * scale,
+                   this->elt_[2 * mi + 0][8 * ki + 2] * scale,
+                   this->elt_[2 * mi + 0][8 * ki + 3] * scale,
+                   this->elt_[2 * mi + 0][8 * ki + 4] * scale,
+                   this->elt_[2 * mi + 0][8 * ki + 5] * scale,
+                   this->elt_[2 * mi + 0][8 * ki + 6] * scale,
+                   this->elt_[2 * mi + 0][8 * ki + 7] * scale);
+            printf("    Row 2: tmp_10-17: %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f\n",
+                   this->elt_[2 * mi + 1][8 * ki + 0] * scale,
+                   this->elt_[2 * mi + 1][8 * ki + 1] * scale,
+                   this->elt_[2 * mi + 1][8 * ki + 2] * scale,
+                   this->elt_[2 * mi + 1][8 * ki + 3] * scale,
+                   this->elt_[2 * mi + 1][8 * ki + 4] * scale,
+                   this->elt_[2 * mi + 1][8 * ki + 5] * scale,
+                   this->elt_[2 * mi + 1][8 * ki + 6] * scale,
+                   this->elt_[2 * mi + 1][8 * ki + 7] * scale);
+            printf("\n");
+        }*/
     }
 
     // The scaling factors.
